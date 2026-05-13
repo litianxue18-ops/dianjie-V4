@@ -60,7 +60,10 @@ import { capitalRoutes } from './routes/capital'
 import { v2DashboardRoutes } from './routes/v2Dashboard'
 import { documentRoutes } from './routes/documents'
 import multipart from '@fastify/multipart'
+import formbody from '@fastify/formbody'
 import { uploadRoutes } from './routes/upload'
+import { meituanWebhookRoutes } from './routes/webhooks/meituan'
+import { meituanIntegrationRoutes } from './routes/integrations/meituan'
 
 const app = Fastify({
   logger: {
@@ -162,12 +165,16 @@ async function bootstrap() {
   app.register(notificationRoutes, { prefix: '/api/notifications' })
   app.register(opsRoutes, { prefix: '/api/ops' })
   app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } })
+  // form-urlencoded 解析（美团 webhook 需要）
+  app.register(formbody, { bodyLimit: 1 * 1024 * 1024 })
   app.register(uploadRoutes, { prefix: '/api' })
   app.register(invoiceRoutes, { prefix: '/api/invoices' })
   app.register(invoicePaymentRoutes, { prefix: '/api/invoice-payments' })
   app.register(capitalRoutes, { prefix: '/api/capital' })
   app.register(v2DashboardRoutes, { prefix: '/api/v2/dashboard' })
   app.register(documentRoutes, { prefix: '/api/documents' })
+  app.register(meituanWebhookRoutes,     { prefix: '/api/webhooks' })
+  app.register(meituanIntegrationRoutes, { prefix: '/api/integrations/meituan' })
 
   // ── 健康检查（含数据库连接验证）──────
   app.get('/health', async () => {
