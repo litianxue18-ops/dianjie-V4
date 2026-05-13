@@ -46,6 +46,7 @@ model Tenant {
   documents      Document[]
   productBatches ProductBatch[]
   stockMovements SupplierStockMovement[]
+  revenueTransactions RevenueTransaction[]
 
   @@map("tenants")
 }
@@ -125,6 +126,10 @@ model Store {
 
   autoSyncRevenue     Boolean  @default(false)
 
+  // 美团到店 webhook 接入（2026-05-13）
+  meituanVoucherEnabled  Boolean   @default(false)   // 110011 触发
+  meituanLastAuthAt      DateTime?                   // 110019 触发
+
   // 门店生命周期: 工程部开店流程
   lifecyclePhase  StoreLifecyclePhase @default(OPERATING)
   engineerId      String?              // 工程部负责人 (StoreLifecyclePhase != OPERATING 时使用)
@@ -143,6 +148,7 @@ model Store {
   expenses       StoreExpense[]
   capitalProjects CapitalProject[]
   documents      Document[]
+  revenueTransactions RevenueTransaction[]
 
   @@unique([tenantId, no])
   @@map("stores")
@@ -1360,4 +1366,91 @@ enum StepStatus {
   APPROVED
   REJECTED
   SKIPPED        // 阈值内自动跳过
+}
+
+// ══════════════════════════════════════════════════════
+// 美团到店 webhook 接入（2026-05-13）
+// 设计稿: docs/superpowers/specs/2026-05-13-美团到店webhook接入-设计稿.md
+// ══════════════════════════════════════════════════════
+
+model MeituanRawMessage {
+  id           String           @id @default(cuid())
+  msgId        String           @unique           // 美团 msgId，幂等防重放
+  msgType      Int
+  developerId  Int
+  businessId   Int
+  ePoiId       String?                            // 服务商门店 id
+  opBizCode    String?
+  msgTimestamp BigInt                             // 美团推送 timestamp（秒）
+  rawHeaders   Json                               // 完整 HTTP headers
+  rawBody      String           @db.Text          // form-urlencoded 原文
+  rawMessage   Json                               // message 字段解析后的 JSON
+
+  status       MeituanMsgStatus @default(RECEIVED)
+  receivedAt   DateTime         @default(now())
+  processedAt  DateTime?
+  failReason   String?
+  retryCount   Int              @default(0)
+
+  resultTxId   String?                            // 关联 RevenueTransaction.id（如有产出）
+
+  @@index([msgType, status])
+  @@index([receivedAt(sort: Desc)])
+  @@map("meituan_raw_messages")
+}
+
+enum MeituanMsgStatus {
+  RECEIVED        // 收到 + 验签通过 + 落库
+  PROCESSED       // 业务处理成功
+  FAILED          // 业务处理失败（可重放）
+  IGNORED         // 非营收 msgType 或未知 msgType，仅记录不处理
+}
+
+model RevenueTransaction {
+  id              String          @id @default(cuid())
+  tenantId        String
+  storeId         String
+  channel         RevenueChannel
+  externalOrderNo String                           // 美团 orderId 字符串
+  externalMsgId   String?                          // 关联 MeituanRawMessage.msgId
+
+  amount          Decimal         @db.Decimal(12, 2) // 客户实付金额（元）
+  refundAmount    Decimal         @default(0) @db.Decimal(12, 2)
+  netAmount       Decimal         @db.Decimal(12, 2) // amount - refundAmount
+
+  paidAt          DateTime                         // 平台口径支付时间
+  refundedAt      DateTime?
+  status          RevenueTxStatus @default(NORMAL)
+
+  rawPayload      Json                             // 落库时的完整业务数据
+  reconciledAt    DateTime?                        // 对账完成时间（Path C 才用）
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id])
+  store           Store           @relation(fields: [storeId], references: [id])
+
+  @@unique([channel, externalOrderNo])             // 防同笔订单重复入账
+  @@index([storeId, paidAt(sort: Desc)])
+  @@index([status])
+  @@map("revenue_transactions")
+}
+
+enum RevenueChannel {
+  MEITUAN_VOUCHER       // 110009 代金券买单
+  MEITUAN_ORDER         // 110029 新订单已支付（MOP + 团购）
+  DOUYIN_VOUCHER        // 抖音代金券（预留）
+  DOUYIN_ORDER          // 抖音订单（预留）
+  AGGREGATOR            // 聚合支付桌签码（预留）
+  WECHAT_MINI           // 微信小程序（预留）
+  ALIPAY_MINI           // 支付宝小程序（预留）
+}
+
+enum RevenueTxStatus {
+  NORMAL                // 正常营收
+  REFUNDED              // 已全退（refundAmount = amount）
+  PARTIAL_REFUND        // 部分退款
+  CANCELED              // 订单取消
+  ORPHAN                // 本地有 / 平台无（异常）
 }
