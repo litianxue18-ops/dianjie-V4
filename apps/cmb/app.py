@@ -3,10 +3,13 @@
 端口：5001（由 PM2 管理，进程名 dianjie-cmb）
 
 职责：封装招行国密签名/加密/通信，供 Node.js API 通过 HTTP 调用。
-外部只暴露两个接口：
-  POST /transfer  → 向供应商发起转账
-  POST /query     → 查询转账结果
+对外接口：
+  POST /transfer  → 向供应商发起转账（同行 / 跨行）
+  POST /query     → 查询付款记录
   GET  /health    → 健康检查
+
+报文规范基准：docs/cmb/2026-05-13-招行BB1PAY-报文规范.md
+funcode: BB1PAYOP（付款经办）/ BB1PAYQR（付款查询）  ← 2026-04-15 通过版
 """
 
 import json
@@ -25,18 +28,24 @@ def _now_cst():
     return datetime.now(tz=CST)
 
 def _reqid():
+    """24 位：yyyymmddHHMMSSmmm (17) + 7 位随机 = 24 字符"""
     return _now_cst().strftime("%Y%m%d%H%M%S%f")[:-3] + str(random.randint(1000000, 9999999))
 
 def _sigtim():
     return _now_cst().strftime("%Y%m%d%H%M%S")
 
-# ── 配置（从环境变量读取，本地开发用默认测试值）─────────────
+def _today():
+    """yyyymmdd，BB1PAYQR 默认查当天用"""
+    return _now_cst().strftime("%Y%m%d")
+
+# ── 配置（环境变量为主，默认值为本地测试值）─────────────
 USE_PROD        = os.getenv("CMB_USE_PROD", "false").lower() == "true"
 
 URL_TEST        = "http://cdctest.cmburl.cn/cdcserver/api/v2"
 URL_PROD        = "https://cdc.cmbchina.com/cdcserver/api/v2"
 URL             = os.getenv("CMB_URL", URL_PROD if USE_PROD else URL_TEST)
 
+# 测试 / 生产 银行 SM2 公钥不同（xlsx + 云洱密钥.txt 已下发）
 BANK_PK_TEST    = "BNsIe9U0x8IeSe4h/dxUzVEz9pie0hDSfMRINRXc7s1UIXfkExnYECF4QqJ2SnHxLv3z/99gsfDQrQ6dzN5lZj0="
 BANK_PK_PROD    = "BEynMEZOjNpwZIiD9jXtZSGr3Ecpwn7r+m+wtafXHb6VIZTnugfuxhcKASq3hX+KX9JlHODDl9/RDKQv4XLOFak="
 BANK_PUBLIC_KEY = os.getenv("CMB_BANK_PUBLIC_KEY", BANK_PK_PROD if USE_PROD else BANK_PK_TEST)
@@ -46,13 +55,23 @@ PRIVATE_KEY = os.getenv("CMB_PRIVATE_KEY", "NBtl7WnuUtA2v5FaebEkU0/Jj1IodLGT6lQq
 PUBLIC_KEY  = os.getenv("CMB_PUBLIC_KEY",  "BGN0+JR7IIs/KKLfrseFEPhYvButN/A4uVkDl1yWNr64WWU/sUVyfQLWXNaPICq8L/k+7OpHex3IH09lBiG4np0=")
 SYM_KEY     = os.getenv("CMB_SYM_KEY",     "VuAzSWQhsoNqzn0K").encode("utf-8")
 ACCOUNT     = os.getenv("CMB_ACCOUNT",     "655905978110000")   # 付款结算账户
-MODNBR      = os.getenv("CMB_MODNBR",      "000002")            # 支付业务模式号
+
+# 业务模式（BB1PAYOP 用，规范 §3.1 / §3.3）
+# busMod: S100B = 支付自动标准模式（4/15 报告 §5.1 + §5.3 通过版用的就是这套）
+# busCod: N02030 = 企银支付经办（无审批）
+BUSMOD      = os.getenv("CMB_BUSMOD",      "S100B")
+BUSCOD      = os.getenv("CMB_BUSCOD",      "N02030")
+
+# 货币码（招行码表，10 = RMB）
+CCY_NBR     = os.getenv("CMB_CCY_NBR",     "10")
 
 # ── 初始化 DcHelper ───────────────────────────────────────
 _helper = dchelper_module.DcHelper(URL, UID, PRIVATE_KEY, PUBLIC_KEY, BANK_PUBLIC_KEY, SYM_KEY)
 
+
 # ── 发送封装 ──────────────────────────────────────────────
 def _call(funcode: str, body: dict) -> dict:
+    """统一组装外层 head/body/signature + 调 dchelper 加密发包 + 解析响应。"""
     payload = {
         "request": {
             "head": {"funcode": funcode, "userid": UID, "reqid": _reqid()},
@@ -63,85 +82,108 @@ def _call(funcode: str, body: dict) -> dict:
     resp_str = _helper.send_request(json.dumps(payload, ensure_ascii=False), funcode)
     return json.loads(resp_str)
 
+
 # ── Flask 应用 ────────────────────────────────────────────
 app = Flask(__name__)
+
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
-        "status": "ok",
-        "env": "prod" if USE_PROD else "test",
-        "uid": UID,
+        "status":  "ok",
+        "env":     "prod" if USE_PROD else "test",
+        "url":     URL,
+        "uid":     UID,
         "account": ACCOUNT,
+        "busMod":  BUSMOD,
+        "busCod":  BUSCOD,
     })
 
 
 @app.route("/transfer", methods=["POST"])
 def transfer():
     """
-    向供应商发起转账。
+    向供应商发起转账 · BB1PAYOP（规范 §3.3）
 
-    请求体：
+    请求体（与 cmbPayment.ts CmbTransferParams 对齐，向前兼容旧调用）：
     {
       "toAccount":  "收款账号",
       "toName":     "收款户名",
-      "amount":     "金额字符串，如 '1000.00'",
-      "bizNo":      "业务参考号（全局唯一，来自 scheduleId）",
+      "amount":     "金额字符串，如 '0.01'",
+      "bizNo":      "业务参考号（= scheduleId，全局唯一，重发必须同值）",
       "remark":     "附言（可选）",
-      "bankCode":   "收款行行号（他行必填）",
-      "bankCity":   "收款开户地（他行必填）"
+      "bankCode":   "收款行联行号（跨行必填，传值即视为跨行）",
+      "bankCity":   "收款开户地（跨行必填，默认值 北京市）",
+      "bankName":   "收款行名（跨行建议传，未传则用 bankCode 兜底）"
     }
 
-    响应体：
+    响应体（与 cmbPayment.ts CmbTransferResult 对齐）：
     {
       "success":    true/false,
-      "resultCode": "SUC0000 或错误码",
-      "resultMsg":  "描述",
-      "txNo":       "银行流水号（成功时）",
-      "raw":        { ...完整银行响应 }
+      "resultCode": "SUC0000 / 错误码",
+      "resultMsg":  "...",
+      "txNo":       "银行业务流水号 bakAppNbr（成功时）",
+      "raw":        { ...完整银行响应（含 reqSts / reqNbr） }
     }
     """
     data = request.get_json(force=True)
-    to_account = data.get("toAccount", "")
-    to_name    = data.get("toName", "")
-    amount     = str(data.get("amount", ""))
-    biz_no     = data.get("bizNo", "")
-    remark     = data.get("remark", "")
-    bank_code  = data.get("bankCode", "")
-    bank_city  = data.get("bankCity", "")
+    to_account = (data.get("toAccount") or "").strip()
+    to_name    = (data.get("toName") or "").strip()
+    amount     = str(data.get("amount") or "").strip()
+    biz_no     = (data.get("bizNo") or "").strip()
+    remark     = (data.get("remark") or "").strip()
+    bank_code  = (data.get("bankCode") or "").strip()
+    bank_city  = (data.get("bankCity") or "").strip()
+    bank_name  = (data.get("bankName") or "").strip()
 
     if not all([to_account, to_name, amount, biz_no]):
-        return jsonify({"success": False, "resultCode": "PARAM_ERROR", "resultMsg": "缺少必填参数"}), 400
+        return jsonify({
+            "success": False, "resultCode": "PARAM_ERROR",
+            "resultMsg": "缺少必填参数 toAccount/toName/amount/bizNo"
+        }), 400
+
+    # 跨行检测：传了 bankCode 视为跨行
+    is_cross_bank = bool(bank_code)
+
+    pay_item = {
+        "ccyNbr": CCY_NBR,           # 货币码 10
+        "dbtAcc": ACCOUNT,           # 付款账号
+        "crtAcc": to_account,        # 收款账号
+        "crtNam": to_name,           # 收款户名
+        "trsAmt": amount,            # 金额
+        "nusAge": remark,            # 转账附言（用途）
+        "yurRef": biz_no,            # 业务参考号（防重）
+    }
+    if is_cross_bank:
+        pay_item["crtBnk"]      = bank_code
+        pay_item["crtBnkCty"]   = bank_city or "北京市"   # 默认北京市（测试环境对收方信息不校验）
+        pay_item["crtBnkLnkNo"] = bank_code               # 通常 = 联行号 = crtBnk
+        pay_item["crtBnkNam"]   = bank_name or bank_code  # 银行名兜底用行号
 
     body = {
-        "modnbr": MODNBR,
-        "refext": biz_no,       # 业务参考号（唯一，防重复）
-        "sndeac": ACCOUNT,      # 付款账号
-        "rcveac": to_account,   # 收款账号
-        "rcvean": to_name,      # 收款户名
-        "trsamt": amount,       # 金额
-        "ccynbr": "RMB",
-        "rpynar": remark,
+        "bb1paybmx1": [
+            {"busMod": BUSMOD, "busCod": BUSCOD},
+        ],
+        "bb1payopx1": [pay_item],
     }
-    if bank_code:
-        body["rcvbnk"] = bank_code
-    if bank_city:
-        body["rcvcty"] = bank_city
 
     try:
-        result = _call("DCPAYOPR", body)
-        head = result.get("response", {}).get("head", {})
-        resp_body = result.get("response", {}).get("body", {})
+        result = _call("BB1PAYOP", body)
+        head      = (result.get("response") or {}).get("head", {}) or {}
+        resp_body = (result.get("response") or {}).get("body", {}) or {}
+        items     = resp_body.get("bb1payopz1") or []
+        first     = items[0] if items else {}
 
-        success = head.get("resultcode") == "SUC0000"
-        # 银行受理成功时返回 rspid 作为流水号
-        tx_no = head.get("rspid", "")
+        # 业务受理成功条件: 外层 head.resultcode=SUC0000 + 内层 errCod=SUC0000 + reqSts=BNK
+        head_ok = head.get("resultcode") == "SUC0000"
+        biz_ok  = first.get("errCod") == "SUC0000"
+        success = head_ok and biz_ok
 
         return jsonify({
             "success":    success,
-            "resultCode": head.get("resultcode", ""),
-            "resultMsg":  head.get("resultmsg", ""),
-            "txNo":       tx_no,
+            "resultCode": first.get("errCod") or head.get("resultcode", ""),
+            "resultMsg":  first.get("msgTxt") or head.get("resultmsg", ""),
+            "txNo":       first.get("bakAppNbr", ""),
             "raw":        result,
         })
 
@@ -156,31 +198,78 @@ def transfer():
 @app.route("/query", methods=["POST"])
 def query():
     """
-    查询付款结果。
+    查询付款记录 · BB1PAYQR（规范 §3.4）
 
-    请求体：{ "bizNo": "发起付款时的业务参考号" }
+    请求体：
+    {
+      "bizNo":     "原发起付款时的 yurRef（必填用于追踪一笔）",
+      "beginDate": "yyyymmdd（可选，默认当天）",
+      "endDate":   "yyyymmdd（可选，默认当天）"
+    }
+
+    响应体：
+    {
+      "success":    true/false,
+      "resultCode": "...",
+      "resultMsg":  "...",
+      "payStatus":  "BNK / ACK / ...（reqSts，命中 yurRef 时填）",
+      "found":      true/false（是否在结果中找到该 yurRef）,
+      "txNo":       "bakAppNbr（命中时填）",
+      "raw":        { ...完整银行响应 }
+    }
     """
-    data   = request.get_json(force=True)
-    biz_no = data.get("bizNo", "")
+    data       = request.get_json(force=True)
+    biz_no     = (data.get("bizNo") or "").strip()
+    begin_date = (data.get("beginDate") or "").strip() or _today()
+    end_date   = (data.get("endDate") or "").strip() or _today()
+
     if not biz_no:
-        return jsonify({"success": False, "resultMsg": "缺少 bizNo"}), 400
+        return jsonify({"success": False, "resultCode": "PARAM_ERROR", "resultMsg": "缺少 bizNo"}), 400
+
+    body = {
+        "bb1payqrx1": [
+            {
+                "busCod":    BUSCOD,
+                "dbtAcc":    ACCOUNT,
+                "beginDate": begin_date,
+                "endDate":   end_date,
+                "yurRef":    biz_no,
+            }
+        ],
+    }
 
     try:
-        result = _call("DCPAYQRY", {"sndeac": ACCOUNT, "refext": biz_no})
-        head   = result.get("response", {}).get("head", {})
-        body   = result.get("response", {}).get("body", {})
+        result    = _call("BB1PAYQR", body)
+        head      = (result.get("response") or {}).get("head", {}) or {}
+        resp_body = (result.get("response") or {}).get("body", {}) or {}
+        items     = resp_body.get("bb1payqrz1") or []
+
+        head_ok = head.get("resultcode") == "SUC0000"
+
+        # 在返回的多笔记录里按 yurRef 精确匹配（避免日期范围捞到他笔）
+        matched = next((i for i in items if (i.get("yurRef") or "").strip() == biz_no), None)
+
         return jsonify({
-            "success":    head.get("resultcode") == "SUC0000",
+            "success":    head_ok,
             "resultCode": head.get("resultcode", ""),
             "resultMsg":  head.get("resultmsg", ""),
-            "payStatus":  body.get("trssta", ""),   # 转账状态
+            "found":      matched is not None,
+            "payStatus":  (matched or {}).get("reqSts", ""),
+            "txNo":       (matched or {}).get("bakAppNbr", ""),
             "raw":        result,
         })
+
     except Exception as e:
-        return jsonify({"success": False, "resultMsg": str(e)}), 500
+        return jsonify({
+            "success":    False,
+            "resultCode": "CMB_ERROR",
+            "resultMsg":  str(e),
+        }), 500
 
 
 if __name__ == "__main__":
     port = int(os.getenv("CMB_SERVICE_PORT", "5001"))
-    print(f"🏦 招行微服务启动 port={port} env={'prod' if USE_PROD else 'test'}")
+    env_lbl = "PROD" if USE_PROD else "TEST"
+    print(f"🏦 招行微服务启动 port={port} env={env_lbl} url={URL} uid={UID}")
+    print(f"   busMod={BUSMOD}  busCod={BUSCOD}  ccyNbr={CCY_NBR}")
     app.run(host="0.0.0.0", port=port, debug=False)
