@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { getToken } from '@/lib/v2-auth'
 
 interface StatusResp {
   stores: Array<{
@@ -29,9 +30,8 @@ export default function MeituanIntegrationPage() {
   async function load() {
     setLoading(true)
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('dj_token') : null
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || ''
-      const resp = await fetch(`${apiBase}/api/integrations/meituan/status`, {
+      const token = getToken()
+      const resp = await fetch(`/api/integrations/meituan/status`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
