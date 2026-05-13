@@ -99,6 +99,58 @@ export async function cmbBalance(account?: string): Promise<CmbBalanceResult> {
   return resp.json()
 }
 
+export interface CmbTransaction {
+  date        : string   // yyyymmdd
+  time        : string   // HHMMSS
+  sequence    : string   // 交易流水 idn (DCSIGREC trsseq 入参)
+  direction   : 'D' | 'C' | string   // D=借/出, C=贷/入
+  amount      : string   // 出账负数, 入账正数
+  counterName : string   // 对方户名
+  counterAcct : string   // 对方账号
+  remark      : string   // 转账附言
+  yurRef      : string   // 业务参考号（我方 = scheduleId）
+}
+
+export interface CmbTransactionsResult {
+  success      : boolean
+  resultCode   : string
+  resultMsg    : string
+  hasMore?     : boolean       // Y/N，是否需要续传
+  nextSequence?: string
+  summary?     : {
+    credit: { amount: string; count: string }   // 入账（贷）汇总
+    debit:  { amount: string; count: string }   // 出账（借）汇总
+  }
+  transactions?: CmbTransaction[]
+  raw?         : any
+}
+
+/**
+ * 交易概要查询 · trsQryByBreakPoint（规范 §3.5）
+ * 对账主接口 — 拉账户日期范围内的实际入账/出账明细，按 yurRef 可匹配 PaymentSchedule
+ *
+ * @param opts.account   账号（可选，默认 CMB_ACCOUNT）
+ * @param opts.beginDate yyyymmdd（可选，默认当天）
+ * @param opts.endDate   yyyymmdd（可选，默认当天）
+ * ⚠️ 限流：同账号 10s 内只能查一次
+ */
+export async function cmbTransactions(opts: {
+  account?  : string
+  beginDate?: string
+  endDate?  : string
+} = {}): Promise<CmbTransactionsResult> {
+  const resp = await fetch(`${CMB_SERVICE}/transactions`, {
+    method : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body   : JSON.stringify(opts),
+    signal : AbortSignal.timeout(30_000),
+  })
+  if (!resp.ok) {
+    throw new Error(`招行交易概要响应异常 ${resp.status}`)
+  }
+  return resp.json()
+}
+
 /** 检查招行微服务是否在线 */
 export async function cmbHealthCheck(): Promise<boolean> {
   try {

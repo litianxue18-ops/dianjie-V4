@@ -267,6 +267,116 @@ def query():
         }), 500
 
 
+@app.route("/transactions", methods=["POST"])
+def transactions():
+    """
+    交易概要查询 · trsQryByBreakPoint（规范 §3.5）
+    对账主接口 — 拉账户日期范围内的实际入账/出账明细。
+
+    请求体：
+    {
+      "account":    "账号（可选，默认 CMB_ACCOUNT）",
+      "beginDate":  "yyyymmdd（可选，默认当天）",
+      "endDate":    "yyyymmdd（可选，默认当天）"
+    }
+
+    响应体：
+    {
+      "success":      true/false,
+      "resultCode":   "...",
+      "resultMsg":    "...",
+      "hasMore":      true/false (Y/N，是否需要续传),
+      "nextSequence": "续传序号",
+      "summary": {
+        "credit": { "amount": "0.00", "count": "0" },   // 入账（贷）
+        "debit":  { "amount": "-0.04", "count": "4" }   // 出账（借）
+      },
+      "transactions": [
+        {
+          "date":       "20260415",
+          "time":       "102100",
+          "sequence":   "C0547EP000056BZ",   // DCSIGREC trsseq 入参
+          "direction":  "D" | "C",            // D 借/出 | C 贷/入
+          "amount":     "-0.01",              // 出账为负，入账为正
+          "counterName": "殷萌涵",            // 对方户名
+          "counterAcct": "6214837811201866",  // 对方账号
+          "remark":     "供应商货款测试-滇界云管",
+          "yurRef":     "DJ-TEST-20260415-4131095"
+        }
+      ],
+      "raw": { ... 完整银行响应 }
+    }
+
+    限流: 同账号 10s 内只能查一次 (xlsx §3)。
+    """
+    data       = request.get_json(force=True) or {}
+    account    = (data.get("account") or ACCOUNT).strip()
+    begin_date = (data.get("beginDate") or "").strip() or _today()
+    end_date   = (data.get("endDate") or "").strip() or _today()
+
+    body = {
+        "TRANSQUERYBYBREAKPOINT_X1": {
+            "cardNbr":   account,
+            "beginDate": begin_date,
+            "endDate":   end_date,
+        }
+    }
+
+    try:
+        result    = _call("trsQryByBreakPoint", body)
+        head      = (result.get("response") or {}).get("head", {}) or {}
+        resp_body = (result.get("response") or {}).get("body", {}) or {}
+
+        # Y1: 续传信息（数组，通常 1 个元素）
+        y1 = (resp_body.get("TRANSQUERYBYBREAKPOINT_Y1") or [{}])[0]
+        # Z1: 汇总（数组，通常 1 个元素）
+        z1 = (resp_body.get("TRANSQUERYBYBREAKPOINT_Z1") or [{}])[0]
+        # Z2: 明细数组
+        z2 = resp_body.get("TRANSQUERYBYBREAKPOINT_Z2") or []
+
+        transactions = [
+            {
+                "date":         t.get("transDate", ""),
+                "time":         t.get("transTime", ""),
+                "sequence":     t.get("transSequenceIdn", ""),
+                "direction":    t.get("loanCode", ""),
+                "amount":       t.get("transAmount", ""),
+                "counterName":  t.get("ctpAcctName", ""),
+                "counterAcct":  t.get("ctpAcctNbr", ""),
+                "remark":       t.get("remarkTextClt", ""),
+                "yurRef":       t.get("yurRef", ""),
+            }
+            for t in z2
+        ]
+
+        return jsonify({
+            "success":      head.get("resultcode") == "SUC0000",
+            "resultCode":   head.get("resultcode", ""),
+            "resultMsg":    head.get("resultmsg", ""),
+            "hasMore":      z1.get("ctnFlag") == "Y",
+            "nextSequence": y1.get("expectNextSequence", ""),
+            "summary": {
+                "credit": {
+                    "amount": z1.get("creditAmount", "0.00"),
+                    "count":  z1.get("creditNums", "0"),
+                },
+                "debit": {
+                    "amount": z1.get("debitAmount", "0.00"),
+                    "count":  z1.get("debitNums", "0"),
+                },
+            },
+            "transactions": transactions,
+            "raw": result,
+        })
+
+    except Exception as e:
+        return jsonify({
+            "success":    False,
+            "resultCode": "CMB_ERROR",
+            "resultMsg":  str(e),
+        }), 500
+
+
 @app.route("/balance", methods=["POST"])
 def balance():
     """
