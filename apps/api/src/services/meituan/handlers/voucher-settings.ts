@@ -22,17 +22,20 @@ export async function handleVoucherSettings(
   const shopId = String(m.poiId)
   const store = await findStoreByShopId(shopId)
 
-  await prisma.opLog.create({
-    data: {
-      tenantId: store?.tenantId || '',
-      action: '美团门店代金券买单设置变更',
-      target: shopId,
-      entityType: 'Store',
-      targetId: store?.id || null,
-      metadata: { changes: m.changes, operateTime: m.operateTime } as any,
-      isAi: true,
-    },
-  })
+  // 仅在找到 tenant 时才写 OpLog（FK 约束）
+  if (store) {
+    await prisma.opLog.create({
+      data: {
+        tenantId: store.tenantId,
+        action: '美团门店代金券买单设置变更',
+        target: shopId,
+        entityType: 'Store',
+        targetId: store.id,
+        metadata: { changes: m.changes, operateTime: m.operateTime } as any,
+        isAi: true,
+      },
+    })
+  }
 
   await sendNotification({
     tenantId: store?.tenantId || '',
