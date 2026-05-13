@@ -6,7 +6,7 @@ import { notifyApprovalPending } from './notification'
 
 import { prisma, Supplier, Receipt } from '@dianjie/db'
 import dayjs from 'dayjs'
-import { cmbTransfer, cmbHealthCheck } from './cmbPayment'
+import { cmbTransferWithCheck, cmbHealthCheck, reportCmbError } from './cmbPayment'
 
 const AUTO_PAY_THRESHOLD = 2000  // 超过此金额需总部审批
 
@@ -170,15 +170,28 @@ export async function executeBankPayment(scheduleId: string) {
   })
 
   try {
-    // ── 调用招行免前置接口 ────────────────────────────
-    const bankResult = await cmbTransfer({
+    // ── 调用招行免前置接口（含 yurRef 防重发协议）────────
+    // cmbTransferWithCheck 会在网络/业务失败时:
+    //   等 11s 避限流 → BB1PAYQR 按 yurRef 查重 → 已收认成功 / 未收同 yurRef 重发
+    //   重试上限 2 次（首发+2 重发 = 3 次尝试），仍失败返 CMB_RETRY_EXHAUSTED
+    const bankResult = await cmbTransferWithCheck({
       toAccount : supplier.bankAccount,
       toName    : supplier.bankAccountName || supplier.name,
       amount    : Number(schedule.amount),
-      bizNo     : scheduleId,          // 用 scheduleId 作为唯一业务参考号，防重复提交
+      bizNo     : scheduleId,          // 业务参考号 = scheduleId 全局唯一，重发不变
       remark    : `货款-${schedule.receipt.no}-${supplier.name}`,
       bankCode  : supplier.bankCode || undefined,
     })
+
+    // 失败 → 上 Sentry 并按错误码归类（docs/cmb/CMB_ERROR_CODES.md §3）
+    if (!bankResult.success) {
+      reportCmbError(bankResult.resultMsg || '招行付款失败', {
+        funcode:    'BB1PAYOP',
+        resultCode: bankResult.resultCode,
+        bizNo:      scheduleId,
+        raw:        bankResult.raw,
+      })
+    }
 
     if (bankResult.success) {
       // ── 付款成功 ───────────────────────────────────
