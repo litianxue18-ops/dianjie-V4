@@ -22,11 +22,15 @@ export async function handleAuditRejected(
   const store = m.scope === 2 && m.vendorShopId ? await findStoreByShopId(m.vendorShopId) : null
 
   // OpLog 需要 tenantId FK；scope=1 总部级 or 找不到 store 时 fallback 到第一个 tenant
-  const tenant = store ?? await prisma.tenant.findFirst({ select: { id: true } })
-  if (tenant) {
+  let tenantId: string | null = store?.tenantId ?? null
+  if (!tenantId) {
+    const t = await prisma.tenant.findFirst({ select: { id: true } })
+    tenantId = t?.id ?? null
+  }
+  if (tenantId) {
     await prisma.opLog.create({
       data: {
-        tenantId: 'tenantId' in tenant ? tenant.tenantId : tenant.id,
+        tenantId,
         action: `美团审核驳回: ${m.auditMessage.rejectReason}`,
         target: m.auditMessage.subjectId,
         entityType: 'MeituanAudit',
