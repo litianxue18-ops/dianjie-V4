@@ -8,7 +8,22 @@
 'use client'
 import { useEffect, useMemo, useState } from 'react'
 import { BlackHero, BottomNav, Chip } from '@/components/v2'
+import { BankAccountList, type BankAccountConfig } from '@/components/v2/bank-account-card'
 import { apiFetch } from '@/lib/v2-auth'
+
+// 招行实时账户列表
+// 数组化设计 - 现在只有母公司主账户, 未来加子公司直接 push entry
+// account 留空 = 后端 env CMB_ACCOUNT (=125925235910001 南京云洱之境餐饮有限公司)
+const BANK_ACCOUNTS: BankAccountConfig[] = [
+  {
+    label: '母公司·主账户',
+    accountName: '南京云洱之境餐饮有限公司',
+    bankName: '招商银行南京城东支行',
+    accountType: '一般户',
+    // account 留空 → 后端用 env 默认值
+  },
+  // TODO: 子公司账户接入后在这里 push 更多 entry
+]
 
 type CashbookSummary = {
   totalBalance: number | string
@@ -128,7 +143,11 @@ export default function FinanceFundsPage() {
 
       {error && <div className="mx-4 mt-3 bg-red-bg text-red-fg rounded-card p-3 text-caption">加载失败: {error}</div>}
 
-      <Section title="账户余额" right={accountsView.length ? `${accountsView.length} 个 · ¥${totalBalance.toLocaleString()}` : ''}>
+      <Section title="招行实时账户" right={`${BANK_ACCOUNTS.length} 个 · 实时`}>
+        <BankAccountList accounts={BANK_ACCOUNTS} />
+      </Section>
+
+      <Section title="账户余额（手工录入）" right={accountsView.length ? `${accountsView.length} 个 · ¥${totalBalance.toLocaleString()}` : ''}>
         {accounts === null && <p className="text-caption text-gray3 text-center py-6">加载中…</p>}
         {accounts !== null && accountsView.length === 0 && (
           <div className="bg-white rounded-card border border-border p-6 text-center">

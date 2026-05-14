@@ -59,6 +59,7 @@ import { invoicePaymentRoutes } from './routes/invoicePayments'
 import { capitalRoutes } from './routes/capital'
 import { v2DashboardRoutes } from './routes/v2Dashboard'
 import { documentRoutes } from './routes/documents'
+import { cmbRoutes } from './routes/cmb'
 import multipart from '@fastify/multipart'
 import { uploadRoutes } from './routes/upload'
 
@@ -168,6 +169,7 @@ async function bootstrap() {
   app.register(capitalRoutes, { prefix: '/api/capital' })
   app.register(v2DashboardRoutes, { prefix: '/api/v2/dashboard' })
   app.register(documentRoutes, { prefix: '/api/documents' })
+  app.register(cmbRoutes, { prefix: '/api/cmb' })
 
   // ── 健康检查（含数据库连接验证）──────
   app.get('/health', async () => {

@@ -12,6 +12,19 @@ import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '@/lib/v2-auth'
 import { Chip } from '@/components/v2'
 
+// 复用 bank-account-card 同款 sessionStorage 缓存 key, 跨页面共享 10s 窗口
+type BalanceMini = { balance?: string; available?: string; success?: boolean }
+function readBalanceCache(): { data: BalanceMini; at: number } | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = sessionStorage.getItem('cmb:balance:default')
+    if (!raw) return null
+    const c = JSON.parse(raw)
+    if (Date.now() - c.at > 12_000) return null
+    return c
+  } catch { return null }
+}
+
 type Receipt = {
   id: string; no: string; totalAmount: string | number; deliveryDate: string
   store?: { name: string } | null
@@ -52,6 +65,7 @@ export default function FinancePayablePage() {
   const [payAmount, setPayAmount] = useState('')
   const [payNote, setPayNote] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [bankAvailable, setBankAvailable] = useState<number | null>(null)
 
   function load() {
     apiFetch<Invoice[]>('/api/invoice-payments/payable')
@@ -59,6 +73,26 @@ export default function FinancePayablePage() {
       .catch(e => setError(e.message))
   }
   useEffect(() => { load() }, [])
+
+  // 招行实时可用余额, 用于"应付 vs 可用"对比
+  // 先吃 sessionStorage 缓存避撞 10s 限流, miss 再打银行
+  useEffect(() => {
+    const cached = readBalanceCache()
+    if (cached?.data?.success && cached.data.available != null) {
+      setBankAvailable(Number(cached.data.available))
+      return
+    }
+    apiFetch<{ success: boolean; available?: string; balance?: string }>('/api/cmb/balance')
+      .then(resp => {
+        if (resp.success && resp.available != null) {
+          setBankAvailable(Number(resp.available))
+          try {
+            sessionStorage.setItem('cmb:balance:default', JSON.stringify({ data: resp, at: Date.now() }))
+          } catch {}
+        }
+      })
+      .catch(() => { /* 银行查询失败不阻塞应付列表 */ })
+  }, [])
 
   // 排序: 逾期 > 即将到期 > 余额大 > 余额小
   const sorted = useMemo(() => {
@@ -135,6 +169,25 @@ export default function FinancePayablePage() {
             <div className="font-num text-button text-green-fg">¥{totals.paid.toLocaleString()}</div>
           </div>
         </div>
+        {/* 银行可用 vs 应付 — 现金流一眼可见 */}
+        {bankAvailable !== null && (() => {
+          const gap = bankAvailable - totals.remaining
+          const shortfall = gap < 0
+          return (
+            <div className="mt-3 pt-3 border-t border-white/15 flex items-center gap-3 text-caption">
+              <div className="flex-1">
+                <div className="text-micro text-white/60">招行可用 · 实时</div>
+                <div className="font-num text-button">¥{bankAvailable.toLocaleString()}</div>
+              </div>
+              <div className="flex-1 text-right">
+                <div className="text-micro text-white/60">{shortfall ? '缺口' : '盈余'}</div>
+                <div className={`font-num text-button ${shortfall ? 'text-red-fg' : 'text-green-fg'}`}>
+                  {shortfall ? '−' : '+'}¥{Math.abs(gap).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          )
+        })()}
       </div>
 
       {error && <div className="mx-4 mt-3 bg-red-bg text-red-fg rounded-card p-3 text-caption">{error}</div>}

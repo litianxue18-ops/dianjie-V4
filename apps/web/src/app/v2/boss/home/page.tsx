@@ -17,6 +17,20 @@ import { GlanceStrip } from '@/components/v2/glance-strip'
 import { Sparkline } from '@/components/v2/sparkline'
 import { UserMenu } from '@/components/v2/user-menu'
 import { useDashboard, LoadingScreen, ErrorScreen, greetingFor } from '@/components/v2/use-dashboard'
+import { BankAccountList, type BankAccountConfig } from '@/components/v2/bank-account-card'
+
+// 招行实时账户列表（与 finance/funds 保持一致）
+// 数组化设计 - 现在只有母公司主账户, 未来加子公司直接 push entry
+const BANK_ACCOUNTS: BankAccountConfig[] = [
+  {
+    label: '母公司·主账户',
+    accountName: '南京云洱之境餐饮有限公司',
+    bankName: '招商银行南京城东支行',
+    accountType: '一般户',
+    // account 留空 → 后端用 env 默认值
+  },
+  // TODO: 子公司账户接入后在这里 push 更多 entry
+]
 
 
 export default function BossHomePage() {
@@ -60,6 +74,11 @@ export default function BossHomePage() {
           <div className="text-micro text-gray3 mt-0.5">各店建店投入台账</div>
         </a>
       </div>
+
+      {/* 招行实时账户 — 老板可见母公司主账户余额 */}
+      <Section title="招行实时账户" right={`${BANK_ACCOUNTS.length} 个 · 实时`}>
+        <BankAccountList accounts={BANK_ACCOUNTS} />
+      </Section>
 
       {/* 待审批 */}
       {data.approvals && (
